@@ -1541,42 +1541,48 @@ function TestInterface({ testData, user, onComplete }) {
     if (submitRef.current) return;
     submitRef.current = true;
     setSubmitted(true);
+    try {
+      const answersToSave = Array.isArray(finalAnswers) ? finalAnswers : answersRef.current;
+      const finalShot = await uploadSessionScreenshot("submit");
+      const combinedShots = finalShot
+        ? [...proctoringShotsRef.current, finalShot]
+        : proctoringShotsRef.current;
 
-    const answersToSave = Array.isArray(finalAnswers) ? finalAnswers : answersRef.current;
-    const finalShot = await uploadSessionScreenshot("submit");
-    const combinedShots = finalShot
-      ? [...proctoringShotsRef.current, finalShot]
-      : proctoringShotsRef.current;
-
-    const correct = answersToSave.filter((a) => a.correct).length;
-    const score = Math.round((correct / testData.numQuestions) * 100);
-    const result = {
-      candidateId: user.uid,
-      candidateName: user.name,
-      testId: testData.testId,
-      position: testData.position,
-      score, correct,
-      total: testData.numQuestions,
-      warnings: warnings.length,
-      timeTaken: `${Math.floor((testData.duration * 60 - timeLeft) / 60)}m`,
-      submittedAt: nowISO(),
-      answers: answersToSave,
-      questionsAsked: questions.map((item, idx) => ({
-        questionIndex: idx,
-        question: item.question,
-        options: item.options || [],
-        correctOptionIndex: item.correctIndex,
-        correctOption: item.options?.[item.correctIndex] ?? "N/A",
-        difficulty: item.difficulty,
-      })),
-      proctoringScreenshots: combinedShots,
-    };
-    await dbSet("results", `${user.uid}_result`, result);
-    // Remove candidate from live monitor once test is submitted.
-    await deleteDoc(doc(db, "liveSessions", user.uid)).catch((err) =>
-      console.error("Failed to remove live session on submit:", err)
-    );
-    onComplete(result);
+      const correct = answersToSave.filter((a) => a.correct).length;
+      const score = Math.round((correct / testData.numQuestions) * 100);
+      const result = {
+        candidateId: user.uid,
+        candidateName: user.name,
+        testId: testData.testId,
+        position: testData.position,
+        score, correct,
+        total: testData.numQuestions,
+        warnings: warnings.length,
+        timeTaken: `${Math.floor((testData.duration * 60 - timeLeft) / 60)}m`,
+        submittedAt: nowISO(),
+        answers: answersToSave,
+        questionsAsked: questions.map((item, idx) => ({
+          questionIndex: idx,
+          question: item.question,
+          options: item.options || [],
+          correctOptionIndex: item.correctIndex,
+          correctOption: item.options?.[item.correctIndex] ?? "N/A",
+          difficulty: item.difficulty,
+        })),
+        proctoringScreenshots: combinedShots,
+      };
+      await dbSet("results", `${user.uid}_result`, result);
+      // Remove candidate from live monitor once test is submitted.
+      await deleteDoc(doc(db, "liveSessions", user.uid)).catch((err) =>
+        console.error("Failed to remove live session on submit:", err)
+      );
+      onComplete(result);
+    } catch (err) {
+      console.error("Submit failed:", err);
+      alert("Submission failed. Please check your internet/firestore permissions and try again.");
+      submitRef.current = false;
+      setSubmitted(false);
+    }
   };
 
   const fmt = (s) =>
