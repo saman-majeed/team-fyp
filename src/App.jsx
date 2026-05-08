@@ -1268,6 +1268,32 @@ function TestInterface({ testData, user, onComplete }) {
     lastSource: "",
     totalCaptured: 0,
   });
+  const waitForVideoReady = async (timeoutMs = 5000) => {
+    const video = videoRef.current;
+    if (!video) return false;
+    if (video.videoWidth > 0 && video.videoHeight > 0) return true;
+
+    return await new Promise((resolve) => {
+      const onReady = () => {
+        if (video.videoWidth > 0 && video.videoHeight > 0) {
+          cleanup();
+          resolve(true);
+        }
+      };
+      const cleanup = () => {
+        clearTimeout(timeoutId);
+        video.removeEventListener("loadedmetadata", onReady);
+        video.removeEventListener("canplay", onReady);
+      };
+      const timeoutId = setTimeout(() => {
+        cleanup();
+        resolve(video.videoWidth > 0 && video.videoHeight > 0);
+      }, timeoutMs);
+
+      video.addEventListener("loadedmetadata", onReady);
+      video.addEventListener("canplay", onReady);
+    });
+  };
   const withTimeout = async (promise, ms, label) => {
     let timerId;
     try {
@@ -1316,16 +1342,36 @@ function TestInterface({ testData, user, onComplete }) {
   const captureScreenshotBlob = async () => {
     try {
       const video = videoRef.current;
-      if (!video || video.videoWidth <= 0 || video.videoHeight <= 0) return null;
-      const canvas = document.createElement("canvas");
-      canvas.width = 960;
-      canvas.height = 540;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return null;
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      return await new Promise((resolve) => {
-        canvas.toBlob((blob) => resolve(blob), "image/jpeg", 0.8);
-      });
+      const isVideoReady = await waitForVideoReady(5000);
+
+      if (video && isVideoReady && video.videoWidth > 0 && video.videoHeight > 0) {
+        const canvas = document.createElement("canvas");
+        canvas.width = 960;
+        canvas.height = 540;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return null;
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        return await new Promise((resolve) => {
+          canvas.toBlob((blob) => resolve(blob), "image/jpeg", 0.8);
+        });
+      }
+
+      const track = cameraStreamRef.current?.getVideoTracks?.()[0];
+      if (track && "ImageCapture" in window) {
+        const imageCapture = new window.ImageCapture(track);
+        const bitmap = await imageCapture.grabFrame();
+        const canvas = document.createElement("canvas");
+        canvas.width = 960;
+        canvas.height = 540;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return null;
+        ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+        return await new Promise((resolve) => {
+          canvas.toBlob((blob) => resolve(blob), "image/jpeg", 0.8);
+        });
+      }
+
+      return null;
     } catch (err) {
       console.error("Screenshot capture failed:", err);
       return null;
@@ -1371,6 +1417,17 @@ function TestInterface({ testData, user, onComplete }) {
       }));
       return { url: inlineUrl, path: null, capturedAt: nowISO(), reason, source: "inline-fallback" };
     }
+  };
+
+  const uploadScreenshotWithRetry = async (reason, attempts = 3, delayMs = 1200) => {
+    for (let i = 0; i < attempts; i += 1) {
+      const shot = await uploadSessionScreenshot(reason);
+      if (shot) return shot;
+      if (i < attempts - 1) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+    return null;
   };
 
   // Camera
@@ -1459,7 +1516,7 @@ function TestInterface({ testData, user, onComplete }) {
   useEffect(() => {
     const captureAndStoreShot = async (reason) => {
       if (submitRef.current) return;
-      const shot = await uploadSessionScreenshot(reason);
+      const shot = await uploadScreenshotWithRetry(reason);
       if (!shot) return;
       setProctoringShots((prev) => [...prev, shot]);
     };
