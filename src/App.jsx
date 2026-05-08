@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { db } from "./firebase/config";
+import { db, storage } from "./firebase/config";
 import {
   collection,
   doc,
@@ -12,6 +12,7 @@ import {
   onSnapshot,
   serverTimestamp,
 } from "firebase/firestore";
+import { ref as storageRef, uploadBytes, getDownloadURL } from "firebase/storage";
 
 // ─── DB HELPERS ───────────────────────────────────────────────────────────────
 async function dbSet(col, id, data) {
@@ -773,32 +774,33 @@ function ManageTests({ tests, setTests }) {
                 : t.createdAt?.toDate?.() || null;
 
             return (
-            <div key={t.id} style={{ ...S.card, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <div>
-                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
-                  <span style={{ fontSize: 16, fontWeight: 700 }}>{t.position}</span>
-                  <Tag color={t.status === "active" ? "success" : "warning"}>{t.status || "draft"}</Tag>
-                </div>
-                <div style={{ fontSize: 13, color: C.muted, display: "flex", gap: 16, flexWrap: "wrap" }}>
-                  <span>🎯 {t.numQuestions} questions</span>
-                  <span>⏱ {t.duration} min</span>
-                  <span>🆔 {t.candidateId}</span>
-                  <span>📅 {createdAtDate && !Number.isNaN(createdAtDate.getTime()) ? createdAtDate.toLocaleDateString() : "—"}</span>
-                </div>
-                {normalizedSkills.length > 0 && (
-                  <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
-                    {normalizedSkills.map((s) => (
-                      <span key={s} style={{ fontSize: 11, padding: "2px 8px", background: C.accentDim, borderRadius: 10, color: C.accent }}>{s}</span>
-                    ))}
+              <div key={t.id} style={{ ...S.card, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+                    <span style={{ fontSize: 16, fontWeight: 700 }}>{t.position}</span>
+                    <Tag color={t.status === "active" ? "success" : "warning"}>{t.status || "draft"}</Tag>
                   </div>
-                )}
+                  <div style={{ fontSize: 13, color: C.muted, display: "flex", gap: 16, flexWrap: "wrap" }}>
+                    <span>🎯 {t.numQuestions} questions</span>
+                    <span>⏱ {t.duration} min</span>
+                    <span>🆔 {t.candidateId}</span>
+                    <span>📅 {createdAtDate && !Number.isNaN(createdAtDate.getTime()) ? createdAtDate.toLocaleDateString() : "—"}</span>
+                  </div>
+                  {normalizedSkills.length > 0 && (
+                    <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      {normalizedSkills.map((s) => (
+                        <span key={s} style={{ fontSize: 11, padding: "2px 8px", background: C.accentDim, borderRadius: 10, color: C.accent }}>{s}</span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+                  <button onClick={() => setSelected(t)} style={S.btn("ghost", "sm")}>View</button>
+                  <button onClick={() => deleteTest(t.id)} style={{ ...S.btn("ghost", "sm"), color: C.danger }}>Delete</button>
+                </div>
               </div>
-              <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
-                <button onClick={() => setSelected(t)} style={S.btn("ghost", "sm")}>View</button>
-                <button onClick={() => deleteTest(t.id)} style={{ ...S.btn("ghost", "sm"), color: C.danger }}>Delete</button>
-              </div>
-            </div>
-          )})}
+            )
+          })}
         </div>
       )}
 
@@ -980,6 +982,16 @@ function DemoMonitorCard() {
 // ─── RESULTS VIEW ─────────────────────────────────────────────────────────────
 function ResultsView({ results }) {
   const [selected, setSelected] = useState(null);
+  const selectedAnswers =
+    selected?.answers ||
+    selected?.questionAnswers ||
+    selected?.responses ||
+    [];
+  const selectedShots =
+    selected?.proctoringScreenshots ||
+    selected?.screenshots ||
+    selected?.proctoringShots ||
+    [];
 
   return (
     <div>
@@ -1026,6 +1038,64 @@ function ResultsView({ results }) {
             <div style={{ fontSize: 13, color: C.muted }}>
               Time taken: {selected.timeTaken || "—"} &nbsp;·&nbsp;
               Submitted: {selected.submittedAt ? new Date(selected.submittedAt).toLocaleString() : "—"}
+            </div>
+
+            <div style={{ ...S.card, marginTop: "1rem" }}>
+              <h3 style={{ margin: "0 0 0.75rem", fontSize: 15 }}>Question-wise Answers</h3>
+              {!Array.isArray(selectedAnswers) || selectedAnswers.length === 0 ? (
+                <div style={{ fontSize: 13, color: C.muted }}>
+                  No answer details available for this record. This usually means this result was submitted before detailed Q/A logging was enabled.
+                </div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {selectedAnswers.map((a, idx) => (
+                    <div key={`${selected.id}_${idx}`} style={{ background: C.bg, borderRadius: 8, padding: "10px 12px" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 6 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600 }}>
+                          Q{(a.questionIndex ?? idx) + 1}: {a.question || "Question text unavailable"}
+                        </div>
+                        <Tag color={a.correct ? "success" : "danger"}>{a.correct ? "Correct" : "Wrong"}</Tag>
+                      </div>
+                      <div style={{ fontSize: 12, color: C.muted }}>
+                        Selected: {a.selectedOption || a.options?.[a.selected] || "Not answered"}
+                      </div>
+                      <div style={{ fontSize: 12, color: C.muted }}>
+                        Correct: {a.correctOption || a.options?.[a.correctOptionIndex] || "N/A"}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div style={{ ...S.card, marginTop: "1rem" }}>
+              <h3 style={{ margin: "0 0 0.75rem", fontSize: 15 }}>Proctoring Screenshots</h3>
+              {!Array.isArray(selectedShots) || selectedShots.length === 0 ? (
+                <div style={{ fontSize: 13, color: C.muted }}>
+                  No screenshots found in this result record. Please run a new test attempt after this update to verify screenshot capture.
+                </div>
+              ) : (
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 10 }}>
+                  {selectedShots.map((shot, idx) => (
+                    <a
+                      key={`${selected.id}_shot_${idx}`}
+                      href={shot.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{ textDecoration: "none", color: "inherit" }}
+                    >
+                      <div style={{ background: C.bg, borderRadius: 8, padding: 8 }}>
+                        <div style={{ width: "100%", aspectRatio: "16/9", background: "#000", borderRadius: 6, overflow: "hidden", marginBottom: 6 }}>
+                          <img src={shot.url} alt={`Proctoring capture ${idx + 1}`} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                        </div>
+                        <div style={{ fontSize: 11, color: C.muted }}>
+                          {shot.capturedAt ? new Date(shot.capturedAt).toLocaleString() : "Timestamp unavailable"}
+                        </div>
+                      </div>
+                    </a>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -1186,8 +1256,18 @@ function TestInterface({ testData, user, onComplete }) {
   const videoRef = useRef(null);
   const cameraStreamRef = useRef(null);
   const submitRef = useRef(false); // prevent double submit
+  const answersRef = useRef([]);
+  const proctoringShotsRef = useRef([]);
   const liveRef = useRef({ currentIdx: 0, timeLeft: testData.duration * 60, warningCount: 0 });
   const skills = testData.skills?.length ? testData.skills : [testData.position];
+  const [proctoringShots, setProctoringShots] = useState([]);
+  const [proctoringDebug, setProctoringDebug] = useState({
+    lastAttemptAt: null,
+    lastSuccessAt: null,
+    lastError: "",
+    lastSource: "",
+    totalCaptured: 0,
+  });
 
   const capturePreviewImage = async () => {
     try {
@@ -1220,6 +1300,66 @@ function TestInterface({ testData, user, onComplete }) {
     return null;
   };
 
+  const captureScreenshotBlob = async () => {
+    try {
+      const video = videoRef.current;
+      if (!video || video.videoWidth <= 0 || video.videoHeight <= 0) return null;
+      const canvas = document.createElement("canvas");
+      canvas.width = 960;
+      canvas.height = 540;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return null;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      return await new Promise((resolve) => {
+        canvas.toBlob((blob) => resolve(blob), "image/jpeg", 0.8);
+      });
+    } catch (err) {
+      console.error("Screenshot capture failed:", err);
+      return null;
+    }
+  };
+
+  const uploadSessionScreenshot = async (reason = "interval") => {
+    setProctoringDebug((prev) => ({
+      ...prev,
+      lastAttemptAt: nowISO(),
+      lastError: "",
+    }));
+
+    try {
+      const blob = await captureScreenshotBlob();
+      if (!blob) return null;
+      const capturedAt = nowISO();
+      const filePath = `sessionScreenshots/${testData.testId}/${user.uid}/${Date.now()}.jpg`;
+      const fileRef = storageRef(storage, filePath);
+      await uploadBytes(fileRef, blob, { contentType: "image/jpeg" });
+      const url = await getDownloadURL(fileRef);
+      setProctoringDebug((prev) => ({
+        ...prev,
+        lastSuccessAt: capturedAt,
+        lastSource: "firebase-storage",
+      }));
+      return { url, path: filePath, capturedAt, reason };
+    } catch (err) {
+      console.error("Screenshot upload failed:", err);
+      const inlineUrl = await capturePreviewImage();
+      if (!inlineUrl) {
+        setProctoringDebug((prev) => ({
+          ...prev,
+          lastError: err?.message || "Screenshot upload failed",
+        }));
+        return null;
+      }
+      const fallbackTime = nowISO();
+      setProctoringDebug((prev) => ({
+        ...prev,
+        lastSuccessAt: fallbackTime,
+        lastSource: "inline-fallback",
+      }));
+      return { url: inlineUrl, path: null, capturedAt: nowISO(), reason, source: "inline-fallback" };
+    }
+  };
+
   // Camera
   useEffect(() => {
     navigator.mediaDevices.getUserMedia({ video: true })
@@ -1227,7 +1367,7 @@ function TestInterface({ testData, user, onComplete }) {
         cameraStreamRef.current = stream;
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
-          videoRef.current.play().catch(() => {});
+          videoRef.current.play().catch(() => { });
         }
       })
       .catch(() => addWarning("Camera turned off"));
@@ -1241,7 +1381,7 @@ function TestInterface({ testData, user, onComplete }) {
   useEffect(() => {
     const t = setInterval(() => {
       setTimeLeft((prev) => {
-        if (prev <= 1) { clearInterval(t); doSubmit([]); return 0; }
+        if (prev <= 1) { clearInterval(t); doSubmit(answersRef.current); return 0; }
         return prev - 1;
       });
     }, 1000);
@@ -1263,6 +1403,18 @@ function TestInterface({ testData, user, onComplete }) {
       warningCount: warnings.length,
     };
   }, [currentIdx, timeLeft, warnings.length]);
+
+  useEffect(() => {
+    answersRef.current = answers;
+  }, [answers]);
+
+  useEffect(() => {
+    proctoringShotsRef.current = proctoringShots;
+    setProctoringDebug((prev) => ({
+      ...prev,
+      totalCaptured: proctoringShots.length,
+    }));
+  }, [proctoringShots]);
 
   // Live session updates to Firestore every 5 seconds
   useEffect(() => {
@@ -1290,6 +1442,16 @@ function TestInterface({ testData, user, onComplete }) {
     }, 5000);
     return () => clearInterval(interval);
   }, [user.uid, user.name, testData.position, testData.numQuestions]);
+
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      if (submitRef.current) return;
+      const shot = await uploadSessionScreenshot("interval");
+      if (!shot) return;
+      setProctoringShots((prev) => [...prev, shot]);
+    }, 120000);
+    return () => clearInterval(interval);
+  }, [user.uid, testData.testId]);
 
   // Load first question on mount
   useEffect(() => { loadNextQuestion("easy"); }, []);
@@ -1338,8 +1500,22 @@ function TestInterface({ testData, user, onComplete }) {
 
     const q = questions[currentIdx];
     const correct = optionIdx === q.correctIndex;
-    const newAns = [...answers, { questionIndex: currentIdx, question: q.question, selected: optionIdx, correct, difficulty: q.difficulty }];
+    const newAns = [
+      ...answers,
+      {
+        questionIndex: currentIdx,
+        question: q.question,
+        selected: optionIdx,
+        selectedOption: q.options?.[optionIdx] ?? "Not answered",
+        correctOptionIndex: q.correctIndex,
+        correctOption: q.options?.[q.correctIndex] ?? "N/A",
+        options: q.options || [],
+        correct,
+        difficulty: q.difficulty,
+      },
+    ];
     setAnswers(newAns);
+    answersRef.current = newAns;
 
     // Adaptive difficulty
     const newStreak = correct ? streak + 1 : 0;
@@ -1366,7 +1542,13 @@ function TestInterface({ testData, user, onComplete }) {
     submitRef.current = true;
     setSubmitted(true);
 
-    const correct = finalAnswers.filter((a) => a.correct).length;
+    const answersToSave = Array.isArray(finalAnswers) ? finalAnswers : answersRef.current;
+    const finalShot = await uploadSessionScreenshot("submit");
+    const combinedShots = finalShot
+      ? [...proctoringShotsRef.current, finalShot]
+      : proctoringShotsRef.current;
+
+    const correct = answersToSave.filter((a) => a.correct).length;
     const score = Math.round((correct / testData.numQuestions) * 100);
     const result = {
       candidateId: user.uid,
@@ -1378,7 +1560,16 @@ function TestInterface({ testData, user, onComplete }) {
       warnings: warnings.length,
       timeTaken: `${Math.floor((testData.duration * 60 - timeLeft) / 60)}m`,
       submittedAt: nowISO(),
-      answers: finalAnswers,
+      answers: answersToSave,
+      questionsAsked: questions.map((item, idx) => ({
+        questionIndex: idx,
+        question: item.question,
+        options: item.options || [],
+        correctOptionIndex: item.correctIndex,
+        correctOption: item.options?.[item.correctIndex] ?? "N/A",
+        difficulty: item.difficulty,
+      })),
+      proctoringScreenshots: combinedShots,
     };
     await dbSet("results", `${user.uid}_result`, result);
     // Remove candidate from live monitor once test is submitted.
@@ -1538,8 +1729,30 @@ function TestInterface({ testData, user, onComplete }) {
           </div>
         )}
 
+        {/* Proctoring debug */}
+        <div style={{ background: C.bg, borderRadius: 8, padding: "10px 12px" }}>
+          <div style={{ fontSize: 12, color: C.accent, marginBottom: 8 }}>🛠 Proctoring Status</div>
+          <div style={{ fontSize: 11, color: C.muted, marginBottom: 4 }}>
+            Captures: {proctoringDebug.totalCaptured}
+          </div>
+          <div style={{ fontSize: 11, color: C.muted, marginBottom: 4 }}>
+            Last Attempt: {proctoringDebug.lastAttemptAt ? new Date(proctoringDebug.lastAttemptAt).toLocaleTimeString() : "—"}
+          </div>
+          <div style={{ fontSize: 11, color: C.muted, marginBottom: 4 }}>
+            Last Success: {proctoringDebug.lastSuccessAt ? new Date(proctoringDebug.lastSuccessAt).toLocaleTimeString() : "—"}
+          </div>
+          <div style={{ fontSize: 11, color: C.muted, marginBottom: 4 }}>
+            Source: {proctoringDebug.lastSource || "—"}
+          </div>
+          {proctoringDebug.lastError && (
+            <div style={{ fontSize: 11, color: C.danger }}>
+              Error: {proctoringDebug.lastError}
+            </div>
+          )}
+        </div>
+
         <button
-          onClick={() => { if (window.confirm("Submit the test now?")) doSubmit(answers); }}
+          onClick={() => { if (window.confirm("Submit the test now?")) doSubmit(answersRef.current); }}
           style={{ ...S.btn("danger", "sm"), marginTop: "auto" }}
         >
           Submit Early
