@@ -1268,6 +1268,45 @@ function TestInterface({ testData, user, onComplete }) {
     lastSource: "",
     totalCaptured: 0,
   });
+  const waitForVideoReady = async (timeoutMs = 5000) => {
+    const video = videoRef.current;
+    if (!video) return false;
+    if (video.videoWidth > 0 && video.videoHeight > 0) return true;
+
+    return await new Promise((resolve) => {
+      const onReady = () => {
+        if (video.videoWidth > 0 && video.videoHeight > 0) {
+          cleanup();
+          resolve(true);
+        }
+      };
+      const cleanup = () => {
+        clearTimeout(timeoutId);
+        video.removeEventListener("loadedmetadata", onReady);
+        video.removeEventListener("canplay", onReady);
+      };
+      const timeoutId = setTimeout(() => {
+        cleanup();
+        resolve(video.videoWidth > 0 && video.videoHeight > 0);
+      }, timeoutMs);
+
+      video.addEventListener("loadedmetadata", onReady);
+      video.addEventListener("canplay", onReady);
+    });
+  };
+  const withTimeout = async (promise, ms, label) => {
+    let timerId;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise((_, reject) => {
+          timerId = setTimeout(() => reject(new Error(`${label} timed out`)), ms);
+        }),
+      ]);
+    } finally {
+      if (timerId) clearTimeout(timerId);
+    }
+  };
 
   const capturePreviewImage = async () => {
     try {
@@ -1303,16 +1342,36 @@ function TestInterface({ testData, user, onComplete }) {
   const captureScreenshotBlob = async () => {
     try {
       const video = videoRef.current;
-      if (!video || video.videoWidth <= 0 || video.videoHeight <= 0) return null;
-      const canvas = document.createElement("canvas");
-      canvas.width = 960;
-      canvas.height = 540;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return null;
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      return await new Promise((resolve) => {
-        canvas.toBlob((blob) => resolve(blob), "image/jpeg", 0.8);
-      });
+      const isVideoReady = await waitForVideoReady(5000);
+
+      if (video && isVideoReady && video.videoWidth > 0 && video.videoHeight > 0) {
+        const canvas = document.createElement("canvas");
+        canvas.width = 960;
+        canvas.height = 540;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return null;
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        return await new Promise((resolve) => {
+          canvas.toBlob((blob) => resolve(blob), "image/jpeg", 0.8);
+        });
+      }
+
+      const track = cameraStreamRef.current?.getVideoTracks?.()[0];
+      if (track && "ImageCapture" in window) {
+        const imageCapture = new window.ImageCapture(track);
+        const bitmap = await imageCapture.grabFrame();
+        const canvas = document.createElement("canvas");
+        canvas.width = 960;
+        canvas.height = 540;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return null;
+        ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+        return await new Promise((resolve) => {
+          canvas.toBlob((blob) => resolve(blob), "image/jpeg", 0.8);
+        });
+      }
+
+      return null;
     } catch (err) {
       console.error("Screenshot capture failed:", err);
       return null;
@@ -1358,6 +1417,17 @@ function TestInterface({ testData, user, onComplete }) {
       }));
       return { url: inlineUrl, path: null, capturedAt: nowISO(), reason, source: "inline-fallback" };
     }
+  };
+
+  const uploadScreenshotWithRetry = async (reason, attempts = 3, delayMs = 1200) => {
+    for (let i = 0; i < attempts; i += 1) {
+      const shot = await uploadSessionScreenshot(reason);
+      if (shot) return shot;
+      if (i < attempts - 1) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+    return null;
   };
 
   // Camera
@@ -1444,11 +1514,19 @@ function TestInterface({ testData, user, onComplete }) {
   }, [user.uid, user.name, testData.position, testData.numQuestions]);
 
   useEffect(() => {
-    const interval = setInterval(async () => {
+    const captureAndStoreShot = async (reason) => {
       if (submitRef.current) return;
-      const shot = await uploadSessionScreenshot("interval");
+      const shot = await uploadScreenshotWithRetry(reason);
       if (!shot) return;
       setProctoringShots((prev) => [...prev, shot]);
+    };
+
+    // Capture one baseline screenshot immediately so short tests still have evidence.
+    captureAndStoreShot("initial");
+
+    const interval = setInterval(async () => {
+      if (submitRef.current) return;
+      captureAndStoreShot("interval");
     }, 120000);
     return () => clearInterval(interval);
   }, [user.uid, testData.testId]);
@@ -1541,42 +1619,61 @@ function TestInterface({ testData, user, onComplete }) {
     if (submitRef.current) return;
     submitRef.current = true;
     setSubmitted(true);
+    try {
+      const answersToSave = Array.isArray(finalAnswers) ? finalAnswers : answersRef.current;
+      const finalShot = await withTimeout(
+        uploadSessionScreenshot("submit"),
+        12000,
+        "Final screenshot capture"
+      ).catch((err) => {
+        console.error("Final screenshot skipped:", err);
+        return null;
+      });
+      const combinedShots = finalShot
+        ? [...proctoringShotsRef.current, finalShot]
+        : proctoringShotsRef.current;
 
-    const answersToSave = Array.isArray(finalAnswers) ? finalAnswers : answersRef.current;
-    const finalShot = await uploadSessionScreenshot("submit");
-    const combinedShots = finalShot
-      ? [...proctoringShotsRef.current, finalShot]
-      : proctoringShotsRef.current;
-
-    const correct = answersToSave.filter((a) => a.correct).length;
-    const score = Math.round((correct / testData.numQuestions) * 100);
-    const result = {
-      candidateId: user.uid,
-      candidateName: user.name,
-      testId: testData.testId,
-      position: testData.position,
-      score, correct,
-      total: testData.numQuestions,
-      warnings: warnings.length,
-      timeTaken: `${Math.floor((testData.duration * 60 - timeLeft) / 60)}m`,
-      submittedAt: nowISO(),
-      answers: answersToSave,
-      questionsAsked: questions.map((item, idx) => ({
-        questionIndex: idx,
-        question: item.question,
-        options: item.options || [],
-        correctOptionIndex: item.correctIndex,
-        correctOption: item.options?.[item.correctIndex] ?? "N/A",
-        difficulty: item.difficulty,
-      })),
-      proctoringScreenshots: combinedShots,
-    };
-    await dbSet("results", `${user.uid}_result`, result);
-    // Remove candidate from live monitor once test is submitted.
-    await deleteDoc(doc(db, "liveSessions", user.uid)).catch((err) =>
-      console.error("Failed to remove live session on submit:", err)
-    );
-    onComplete(result);
+      const correct = answersToSave.filter((a) => a.correct).length;
+      const score = Math.round((correct / testData.numQuestions) * 100);
+      const result = {
+        candidateId: user.uid,
+        candidateName: user.name,
+        testId: testData.testId,
+        position: testData.position,
+        score, correct,
+        total: testData.numQuestions,
+        warnings: warnings.length,
+        timeTaken: `${Math.floor((testData.duration * 60 - timeLeft) / 60)}m`,
+        submittedAt: nowISO(),
+        answers: answersToSave,
+        questionsAsked: questions.map((item, idx) => ({
+          questionIndex: idx,
+          question: item.question,
+          options: item.options || [],
+          correctOptionIndex: item.correctIndex,
+          correctOption: item.options?.[item.correctIndex] ?? "N/A",
+          difficulty: item.difficulty,
+        })),
+        proctoringScreenshots: combinedShots,
+      };
+      await withTimeout(
+        dbSet("results", `${user.uid}_result`, result),
+        20000,
+        "Result save"
+      );
+      // Remove candidate from live monitor once test is submitted.
+      await withTimeout(
+        deleteDoc(doc(db, "liveSessions", user.uid)),
+        10000,
+        "Live session cleanup"
+      ).catch((err) => console.error("Failed to remove live session on submit:", err));
+      onComplete(result);
+    } catch (err) {
+      console.error("Submit failed:", err);
+      alert("Submission failed. Please check your internet/firestore permissions and try again.");
+      submitRef.current = false;
+      setSubmitted(false);
+    }
   };
 
   const fmt = (s) =>
