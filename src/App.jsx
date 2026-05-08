@@ -1268,6 +1268,19 @@ function TestInterface({ testData, user, onComplete }) {
     lastSource: "",
     totalCaptured: 0,
   });
+  const withTimeout = async (promise, ms, label) => {
+    let timerId;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise((_, reject) => {
+          timerId = setTimeout(() => reject(new Error(`${label} timed out`)), ms);
+        }),
+      ]);
+    } finally {
+      if (timerId) clearTimeout(timerId);
+    }
+  };
 
   const capturePreviewImage = async () => {
     try {
@@ -1543,7 +1556,14 @@ function TestInterface({ testData, user, onComplete }) {
     setSubmitted(true);
     try {
       const answersToSave = Array.isArray(finalAnswers) ? finalAnswers : answersRef.current;
-      const finalShot = await uploadSessionScreenshot("submit");
+      const finalShot = await withTimeout(
+        uploadSessionScreenshot("submit"),
+        12000,
+        "Final screenshot capture"
+      ).catch((err) => {
+        console.error("Final screenshot skipped:", err);
+        return null;
+      });
       const combinedShots = finalShot
         ? [...proctoringShotsRef.current, finalShot]
         : proctoringShotsRef.current;
@@ -1571,11 +1591,17 @@ function TestInterface({ testData, user, onComplete }) {
         })),
         proctoringScreenshots: combinedShots,
       };
-      await dbSet("results", `${user.uid}_result`, result);
-      // Remove candidate from live monitor once test is submitted.
-      await deleteDoc(doc(db, "liveSessions", user.uid)).catch((err) =>
-        console.error("Failed to remove live session on submit:", err)
+      await withTimeout(
+        dbSet("results", `${user.uid}_result`, result),
+        20000,
+        "Result save"
       );
+      // Remove candidate from live monitor once test is submitted.
+      await withTimeout(
+        deleteDoc(doc(db, "liveSessions", user.uid)),
+        10000,
+        "Live session cleanup"
+      ).catch((err) => console.error("Failed to remove live session on submit:", err));
       onComplete(result);
     } catch (err) {
       console.error("Submit failed:", err);
