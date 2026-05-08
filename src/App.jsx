@@ -1457,11 +1457,19 @@ function TestInterface({ testData, user, onComplete }) {
   }, [user.uid, user.name, testData.position, testData.numQuestions]);
 
   useEffect(() => {
-    const interval = setInterval(async () => {
+    const captureAndStoreShot = async (reason) => {
       if (submitRef.current) return;
-      const shot = await uploadSessionScreenshot("interval");
+      const shot = await uploadSessionScreenshot(reason);
       if (!shot) return;
       setProctoringShots((prev) => [...prev, shot]);
+    };
+
+    // Capture one baseline screenshot immediately so short tests still have evidence.
+    captureAndStoreShot("initial");
+
+    const interval = setInterval(async () => {
+      if (submitRef.current) return;
+      captureAndStoreShot("interval");
     }, 120000);
     return () => clearInterval(interval);
   }, [user.uid, testData.testId]);
